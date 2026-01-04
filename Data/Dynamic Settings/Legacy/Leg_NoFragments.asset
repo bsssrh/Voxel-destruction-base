@@ -1,0 +1,25 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: d169667e856bab443a5aa70287ad4b9c, type: 3}
+  m_Name: Leg_NoFragments
+  m_EditorClassIdentifier: 
+  destructionMode: 0
+  fragmentPrefab: {fileID: 8765710368325038297, guid: e6c8a4ac65ad17f4d919fc22602c9db0,
+    type: 3}
+  voxelPrefab: {fileID: 8854979472368418224, guid: a5f5a91946e3e61428f2f9d13663488e,
+    type: 3}
+  defaultSphereSettings:
+    minSphereRadius: 5
+    maxSphereRadius: 10
+    fragmentCover: 0.2
+  defaultVoxelSettings:
+    cover: 0.3
