@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Profiling;
@@ -75,6 +76,19 @@ namespace VoxelDestructionPro.VoxelObjects
         private Mesh cMesh;
         [SerializeField] [HideInInspector]
         protected bool isCreated;
+
+        private int[] voxelColliderMap;
+        private Dictionary<int, ColliderRecord> voxelColliders;
+        private List<BoxCollider> voxelColliderPool;
+        private int nextVoxelColliderId = 1;
+        private bool voxelCollidersNeedFullRebuild;
+
+        private struct ColliderRecord
+        {
+            public BoxCollider collider;
+            public int3 min;
+            public int3 max;
+        }
         
         //Active
         protected bool meshRegenerationActive;
@@ -98,6 +112,11 @@ namespace VoxelDestructionPro.VoxelObjects
         public int ActiveVoxelCount => voxelData.GetActiveVoxelCount();
         public int3 VoxelDataLength => voxelData.length;
         public int VoxelDataVolume => voxelData.Volume;
+
+        protected bool UseVoxelBoxColliders =>
+            meshSettings != null &&
+            meshSettings.useVoxelBoxColliders &&
+            targetCollider is BoxCollider;
         
         /// <summary>
         /// The current voxeldata, can be null
@@ -203,6 +222,13 @@ namespace VoxelDestructionPro.VoxelObjects
                 startVoxelCount = data.GetActiveVoxelCount();
                 currentVoxelCount = startVoxelCount;
             }
+
+            if (UseVoxelBoxColliders)
+            {
+                ClearVoxelBoxColliders();
+                voxelCollidersNeedFullRebuild = true;
+            }
+
             isValidObject = true;
             meshRegenerationRequested = true;
             
@@ -340,8 +366,20 @@ namespace VoxelDestructionPro.VoxelObjects
                 }
                 else if (targetCollider is BoxCollider boxCollider)
                 {
-                    boxCollider.center = m.bounds.center;
-                    boxCollider.size = m.bounds.size;
+                    if (UseVoxelBoxColliders)
+                    {
+                        EnsureVoxelColliderData();
+                        if (meshSettings.colliderRebuildMode == MeshSettingsObj.ColliderRebuildMode.Full)
+                            voxelCollidersNeedFullRebuild = true;
+
+                        if (voxelCollidersNeedFullRebuild)
+                            RebuildVoxelBoxCollidersFull();
+                    }
+                    else
+                    {
+                        boxCollider.center = m.bounds.center;
+                        boxCollider.size = m.bounds.size;
+                    }
                 }
             }
             else if (targetCollider != null)
@@ -350,7 +388,12 @@ namespace VoxelDestructionPro.VoxelObjects
                 if (targetCollider is MeshCollider meshCollider)
                     meshCollider.sharedMesh = null; 
                 else if (targetCollider is BoxCollider boxCollider)
-                    boxCollider.size = Vector3.zero;
+                {
+                    if (UseVoxelBoxColliders)
+                        ClearVoxelBoxColliders();
+                    else
+                        boxCollider.size = Vector3.zero;
+                }
             }
             
             Profiler.EndSample();
@@ -378,7 +421,12 @@ namespace VoxelDestructionPro.VoxelObjects
                 if (targetCollider is MeshCollider meshCollider)
                     meshCollider.sharedMesh = null; 
                 else if (targetCollider is BoxCollider boxCollider)
-                    boxCollider.size = Vector3.zero;
+                {
+                    if (UseVoxelBoxColliders)
+                        ClearVoxelBoxColliders();
+                    else
+                        boxCollider.size = Vector3.zero;
+                }
             }
             
             isCreated = false;
@@ -529,8 +577,437 @@ namespace VoxelDestructionPro.VoxelObjects
         }
 
         #endregion
-        
+
         #region Other
+
+        protected void RequestVoxelColliderRebuild(int3 min, int3 max)
+        {
+            if (!UseVoxelBoxColliders)
+                return;
+
+            EnsureVoxelColliderData();
+
+            if (meshSettings.colliderRebuildMode == MeshSettingsObj.ColliderRebuildMode.Full)
+            {
+                voxelCollidersNeedFullRebuild = true;
+                return;
+            }
+
+            RebuildVoxelBoxCollidersIncremental(min, max);
+        }
+
+        public bool TryGetClosestColliderPoint(Vector3 worldPoint, out Vector3 closestPoint)
+        {
+            if (UseVoxelBoxColliders && voxelColliders != null && voxelColliders.Count > 0)
+            {
+                bool found = false;
+                float bestDistance = float.MaxValue;
+                Vector3 bestPoint = worldPoint;
+
+                foreach (var record in voxelColliders.Values)
+                {
+                    BoxCollider collider = record.collider;
+                    if (collider == null || !collider.enabled)
+                        continue;
+
+                    Vector3 point = collider.ClosestPoint(worldPoint);
+                    float dist = (point - worldPoint).sqrMagnitude;
+                    if (dist < bestDistance)
+                    {
+                        bestDistance = dist;
+                        bestPoint = point;
+                        found = true;
+                    }
+                }
+
+                closestPoint = bestPoint;
+                return found;
+            }
+
+            if (targetCollider != null)
+            {
+                closestPoint = targetCollider.ClosestPoint(worldPoint);
+                return true;
+            }
+
+            closestPoint = worldPoint;
+            return false;
+        }
+
+        public bool OwnsCollider(Collider collider)
+        {
+            if (collider == null)
+                return false;
+
+            if (collider == targetCollider)
+                return true;
+
+            if (UseVoxelBoxColliders && voxelColliders != null)
+            {
+                foreach (var record in voxelColliders.Values)
+                {
+                    if (record.collider == collider)
+                        return true;
+                }
+            }
+
+            return targetCollider != null && collider.transform == targetCollider.transform;
+        }
+
+        private void EnsureVoxelColliderData()
+        {
+            if (!UseVoxelBoxColliders || voxelData == null)
+                return;
+
+            int volume = voxelData.Volume;
+            if (voxelColliderMap == null || voxelColliderMap.Length != volume)
+            {
+                voxelColliderMap = new int[volume];
+                Array.Fill(voxelColliderMap, -1);
+                voxelColliders = new Dictionary<int, ColliderRecord>();
+                voxelColliderPool = new List<BoxCollider>();
+                nextVoxelColliderId = 1;
+                voxelCollidersNeedFullRebuild = true;
+            }
+            else
+            {
+                voxelColliders ??= new Dictionary<int, ColliderRecord>();
+                voxelColliderPool ??= new List<BoxCollider>();
+            }
+
+            if (targetCollider is BoxCollider boxCollider && !IsColliderTracked(boxCollider))
+            {
+                boxCollider.enabled = false;
+                boxCollider.center = Vector3.zero;
+                boxCollider.size = Vector3.zero;
+                voxelColliderPool.Add(boxCollider);
+            }
+        }
+
+        private bool IsColliderTracked(BoxCollider collider)
+        {
+            if (collider == null)
+                return true;
+
+            if (voxelColliderPool != null && voxelColliderPool.Contains(collider))
+                return true;
+
+            if (voxelColliders != null)
+            {
+                foreach (var record in voxelColliders.Values)
+                {
+                    if (record.collider == collider)
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void ClearVoxelBoxColliders()
+        {
+            if (!UseVoxelBoxColliders)
+                return;
+            
+            voxelColliderPool ??= new List<BoxCollider>();
+            voxelColliders ??= new Dictionary<int, ColliderRecord>();
+
+            foreach (var record in voxelColliders.Values)
+                ReleaseCollider(record.collider);
+
+            voxelColliders.Clear();
+
+            if (voxelColliderMap != null)
+                Array.Fill(voxelColliderMap, -1);
+
+            voxelCollidersNeedFullRebuild = false;
+        }
+
+        private void RebuildVoxelBoxCollidersFull()
+        {
+            if (!UseVoxelBoxColliders)
+                return;
+
+            EnsureVoxelColliderData();
+
+            if (voxelData == null || voxelData.IsEmpty())
+            {
+                ClearVoxelBoxColliders();
+                return;
+            }
+
+            Profiler.BeginSample("Voxel Box Colliders Full Rebuild");
+
+            ClearVoxelBoxColliders();
+            int3 min = int3.zero;
+            int3 max = voxelData.length - new int3(1, 1, 1);
+            RebuildVoxelBoxCollidersInBounds(min, max);
+            voxelCollidersNeedFullRebuild = false;
+
+            Profiler.EndSample();
+        }
+
+        private void RebuildVoxelBoxCollidersIncremental(int3 min, int3 max)
+        {
+            if (!UseVoxelBoxColliders)
+                return;
+
+            EnsureVoxelColliderData();
+
+            if (voxelData == null || voxelData.IsEmpty())
+            {
+                ClearVoxelBoxColliders();
+                return;
+            }
+
+            if (voxelColliderMap == null || voxelColliderMap.Length != voxelData.Volume)
+            {
+                RebuildVoxelBoxCollidersFull();
+                return;
+            }
+
+            int3 dirtyMin = min;
+            int3 dirtyMax = max;
+            if (!ClampBounds(ref dirtyMin, ref dirtyMax))
+                return;
+
+            Profiler.BeginSample("Voxel Box Colliders Incremental Rebuild");
+
+            HashSet<int> collidersToRemove = new HashSet<int>();
+            int3 length = voxelData.length;
+
+            for (int z = dirtyMin.z; z <= dirtyMax.z; z++)
+                for (int y = dirtyMin.y; y <= dirtyMax.y; y++)
+                    for (int x = dirtyMin.x; x <= dirtyMax.x; x++)
+                    {
+                        int id = voxelColliderMap[To1D(x, y, z, length)];
+                        if (id >= 0)
+                            collidersToRemove.Add(id);
+                    }
+
+            foreach (int id in collidersToRemove)
+            {
+                if (!voxelColliders.TryGetValue(id, out ColliderRecord record))
+                    continue;
+
+                dirtyMin = math.min(dirtyMin, record.min);
+                dirtyMax = math.max(dirtyMax, record.max);
+            }
+
+            if (!ClampBounds(ref dirtyMin, ref dirtyMax))
+                return;
+
+            foreach (int id in collidersToRemove)
+            {
+                if (!voxelColliders.TryGetValue(id, out ColliderRecord record))
+                    continue;
+
+                ClearColliderMap(id, record.min, record.max);
+                ReleaseCollider(record.collider);
+                voxelColliders.Remove(id);
+            }
+
+            RebuildVoxelBoxCollidersInBounds(dirtyMin, dirtyMax);
+
+            Profiler.EndSample();
+        }
+
+        private void RebuildVoxelBoxCollidersInBounds(int3 min, int3 max)
+        {
+            if (voxelData == null)
+                return;
+
+            int3 length = voxelData.length;
+
+            for (int z = min.z; z <= max.z; z++)
+                for (int y = min.y; y <= max.y; y++)
+                    for (int x = min.x; x <= max.x; x++)
+                    {
+                        int startIndex = To1D(x, y, z, length);
+                        if (!IsVoxelAvailable(startIndex))
+                            continue;
+
+                        int maxX = x;
+                        while (maxX + 1 <= max.x && IsVoxelAvailable(To1D(maxX + 1, y, z, length)))
+                            maxX++;
+
+                        int maxY = y;
+                        while (maxY + 1 <= max.y && IsRowAvailable(x, maxX, maxY + 1, z, length))
+                            maxY++;
+
+                        int maxZ = z;
+                        while (maxZ + 1 <= max.z && IsLayerAvailable(x, maxX, y, maxY, maxZ + 1, length))
+                            maxZ++;
+
+                        int3 boxMin = new int3(x, y, z);
+                        int3 boxMax = new int3(maxX, maxY, maxZ);
+                        int colliderId = CreateVoxelBoxCollider(boxMin, boxMax);
+
+                        if (colliderId >= 0)
+                        {
+                            for (int zz = boxMin.z; zz <= boxMax.z; zz++)
+                                for (int yy = boxMin.y; yy <= boxMax.y; yy++)
+                                    for (int xx = boxMin.x; xx <= boxMax.x; xx++)
+                                        voxelColliderMap[To1D(xx, yy, zz, length)] = colliderId;
+                        }
+                    }
+        }
+
+        private bool IsVoxelAvailable(int index)
+        {
+            return voxelData.voxels[index].active != 0 && voxelColliderMap[index] == -1;
+        }
+
+        private bool IsRowAvailable(int minX, int maxX, int y, int z, int3 length)
+        {
+            for (int x = minX; x <= maxX; x++)
+            {
+                int index = To1D(x, y, z, length);
+                if (!IsVoxelAvailable(index))
+                    return false;
+            }
+
+            return true;
+        }
+
+        private bool IsLayerAvailable(int minX, int maxX, int minY, int maxY, int z, int3 length)
+        {
+            for (int y = minY; y <= maxY; y++)
+                for (int x = minX; x <= maxX; x++)
+                {
+                    int index = To1D(x, y, z, length);
+                    if (!IsVoxelAvailable(index))
+                        return false;
+                }
+
+            return true;
+        }
+
+        private int CreateVoxelBoxCollider(int3 min, int3 max)
+        {
+            BoxCollider collider = AcquireCollider();
+            if (collider == null)
+                return -1;
+
+            ConfigureCollider(collider);
+
+            float voxelSize = GetSingleVoxelSize();
+            Vector3 voxelCenter = new Vector3(
+                (min.x + max.x) * 0.5f,
+                (min.y + max.y) * 0.5f,
+                (min.z + max.z) * 0.5f);
+            Vector3 voxelSizeLocal = new Vector3(
+                max.x - min.x + 1,
+                max.y - min.y + 1,
+                max.z - min.z + 1) * voxelSize;
+
+            Transform meshTransform = targetFilter != null ? targetFilter.transform : transform;
+            Transform root = GetColliderRootTransform();
+
+            Vector3 worldCenter = meshTransform.TransformPoint(voxelCenter * voxelSize);
+            collider.center = root.InverseTransformPoint(worldCenter);
+
+            Vector3 worldSize = Vector3.Scale(voxelSizeLocal, meshTransform.lossyScale);
+            Vector3 rootScale = root.lossyScale;
+            collider.size = new Vector3(
+                rootScale.x != 0f ? Mathf.Abs(worldSize.x / rootScale.x) : 0f,
+                rootScale.y != 0f ? Mathf.Abs(worldSize.y / rootScale.y) : 0f,
+                rootScale.z != 0f ? Mathf.Abs(worldSize.z / rootScale.z) : 0f);
+
+            int id = nextVoxelColliderId++;
+            voxelColliders[id] = new ColliderRecord
+            {
+                collider = collider,
+                min = min,
+                max = max
+            };
+
+            return id;
+        }
+
+        private void ConfigureCollider(BoxCollider collider)
+        {
+            if (targetCollider is not BoxCollider template || collider == null)
+                return;
+
+            collider.isTrigger = template.isTrigger;
+            collider.sharedMaterial = template.sharedMaterial;
+            collider.contactOffset = template.contactOffset;
+            collider.enabled = true;
+        }
+
+        private BoxCollider AcquireCollider()
+        {
+            if (voxelColliderPool == null)
+                voxelColliderPool = new List<BoxCollider>();
+
+            if (targetCollider is BoxCollider targetBox && !IsColliderTracked(targetBox))
+            {
+                targetBox.enabled = true;
+                return targetBox;
+            }
+
+            for (int i = voxelColliderPool.Count - 1; i >= 0; i--)
+            {
+                BoxCollider collider = voxelColliderPool[i];
+                voxelColliderPool.RemoveAt(i);
+
+                if (collider == null)
+                    continue;
+
+                collider.enabled = true;
+                return collider;
+            }
+
+            Transform root = GetColliderRootTransform();
+            return root != null ? root.gameObject.AddComponent<BoxCollider>() : null;
+        }
+
+        private void ReleaseCollider(BoxCollider collider)
+        {
+            if (collider == null)
+                return;
+
+            collider.enabled = false;
+            collider.center = Vector3.zero;
+            collider.size = Vector3.zero;
+
+            voxelColliderPool ??= new List<BoxCollider>();
+            if (!voxelColliderPool.Contains(collider))
+                voxelColliderPool.Add(collider);
+        }
+
+        private Transform GetColliderRootTransform()
+        {
+            if (targetCollider != null)
+                return targetCollider.transform;
+            if (targetFilter != null)
+                return targetFilter.transform;
+            return transform;
+        }
+
+        private void ClearColliderMap(int colliderId, int3 min, int3 max)
+        {
+            int3 length = voxelData.length;
+
+            for (int z = min.z; z <= max.z; z++)
+                for (int y = min.y; y <= max.y; y++)
+                    for (int x = min.x; x <= max.x; x++)
+                    {
+                        int index = To1D(x, y, z, length);
+                        if (voxelColliderMap[index] == colliderId)
+                            voxelColliderMap[index] = -1;
+                    }
+        }
+
+        private bool ClampBounds(ref int3 min, ref int3 max)
+        {
+            int3 maxIndex = voxelData.length - new int3(1, 1, 1);
+            min = math.max(min, int3.zero);
+            max = math.min(max, maxIndex);
+
+            return min.x <= max.x && min.y <= max.y && min.z <= max.z;
+        }
         
         /// <summary>
         /// This method checks if the settings are valid,
@@ -585,6 +1062,11 @@ namespace VoxelDestructionPro.VoxelObjects
         protected int To1D(Vector3 index, int xMax, int yMax)
         {
             return (int)(index.x + xMax * (index.y + yMax * index.z));
+        }
+
+        private static int To1D(int x, int y, int z, int3 length)
+        {
+            return x + length.x * (y + length.y * z);
         }
         
         protected Vector3 GetMinV3(VoxReader.Voxel[] array)
