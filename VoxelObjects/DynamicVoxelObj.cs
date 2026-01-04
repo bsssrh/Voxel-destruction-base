@@ -370,6 +370,19 @@ namespace VoxelDestructionPro.VoxelObjects
 
             if (voxelIndex.Length > 0)
             {
+                if (TryGetVoxelBounds(voxelIndex, out int3 min, out int3 max))
+                {
+                    int3 padding = new int3(1, 1, 1);
+                    min -= padding;
+                    max += padding;
+
+                    int3 maxIndex = voxelData.length - new int3(1, 1, 1);
+                    min = math.max(min, int3.zero);
+                    max = math.min(max, maxIndex);
+
+                    RequestVoxelColliderRebuild(min, max);
+                }
+
                 meshRegenerationRequested = true;
 
                 if (isoSettings.isolationMode != IsoSettings.IsolationMode.None)
@@ -494,6 +507,38 @@ namespace VoxelDestructionPro.VoxelObjects
             }
 
             return cache;
+        }
+
+        private bool TryGetVoxelBounds(NativeList<int> voxelIndex, out int3 min, out int3 max)
+        {
+            if (voxelIndex.Length == 0 || voxelData == null)
+            {
+                min = int3.zero;
+                max = int3.zero;
+                return false;
+            }
+
+            int3 length = voxelData.length;
+            min = IndexToInt3(voxelIndex[0], length);
+            max = min;
+
+            for (int i = 1; i < voxelIndex.Length; i++)
+            {
+                int3 pos = IndexToInt3(voxelIndex[i], length);
+                min = math.min(min, pos);
+                max = math.max(max, pos);
+            }
+
+            return true;
+        }
+
+        private static int3 IndexToInt3(int index, int3 length)
+        {
+            int z = index / (length.x * length.y);
+            int idx = index - (z * length.x * length.y);
+            int y = idx / length.x;
+            int x = idx % length.x;
+            return new int3(x, y, z);
         }
 
         private void ApplyVoxelFragmentColor(GameObject obj, Vector3 position)

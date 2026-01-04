@@ -114,11 +114,8 @@ namespace VoxelDestructionPro.VoxelModifications
             if (voxelObj == null || colorProfile == null || voxelObj.voxelData == null)
                 return;
 
-            Collider targetCollider = voxelObj.targetCollider;
-            if (targetCollider == null)
+            if (!voxelObj.TryGetClosestColliderPoint(impactPoint, out Vector3 closestPoint))
                 return;
-
-            Vector3 closestPoint = targetCollider.ClosestPoint(impactPoint);
             float maxImpactDistance = Mathf.Max(0.0001f, voxelObj.GetSingleVoxelSize() * 0.5f);
             if ((closestPoint - impactPoint).sqrMagnitude > maxImpactDistance * maxImpactDistance)
                 return;
@@ -149,8 +146,7 @@ namespace VoxelDestructionPro.VoxelModifications
             if (voxelObj == null || colorProfile == null || voxelObj.voxelData == null)
                 return;
 
-            Collider targetCollider = voxelObj.targetCollider;
-            if (targetCollider == null || hitCollider != targetCollider)
+            if (!voxelObj.OwnsCollider(hitCollider))
                 return;
 
             string meshTag = GetColliderMeshTag(voxelObj);

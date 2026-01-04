@@ -17,6 +17,11 @@ namespace VoxelDestructionPro.Settings
             Destroy, Deactive, None
         }
 
+        public enum ColliderRebuildMode
+        {
+            Full, Incremental
+        }
+
         [Header("General")] 
         
         [Tooltip("Defines what should happen once the Voxel object mesh is empty")]
@@ -30,6 +35,14 @@ namespace VoxelDestructionPro.Settings
         public MeshColliderCookingOptions cookingOptions = MeshColliderCookingOptions.None;
         [Tooltip("When using threaded collisionbaking on first baking the mesh collider the object temporary has no collision mesh. This option allows you to freeze a possible rigidbody while baking")]
         public bool freezeRbWhileBaking = true;
+
+        [Header("Voxel Box Colliders")]
+
+        [Tooltip("Generate greedy-merged BoxColliders from the voxel data instead of a single bounds BoxCollider.")]
+        public bool useVoxelBoxColliders;
+
+        [Tooltip("Controls whether voxel box colliders rebuild fully or incrementally when voxels are destroyed.")]
+        public ColliderRebuildMode colliderRebuildMode = ColliderRebuildMode.Full;
     
         [Header("Performance")]
 
